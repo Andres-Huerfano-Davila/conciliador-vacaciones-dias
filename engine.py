@@ -163,7 +163,8 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
         c = col(master,*options,required=dest in {'Área nómina','Área personal','Ingreso'})
         base[dest] = master[c] if c else ''
     # Repeated salary components are allowed only with identical employment data.
-    conflicts = set(base.groupby('SAP').filter(lambda g: len(g.drop_duplicates())>1).SAP)
+    unique_employment = base.drop_duplicates()
+    conflicts = set(unique_employment.loc[unique_employment.SAP.duplicated(keep=False),'SAP'])
     base = base.drop_duplicates('SAP').set_index('SAP')
     prov = prov[prov[col(prov,'TipoCalc')].str.upper().eq('PVVA')]
     base['Provisión'] = aggregate(prov,'Provisión',numbers(prov[col(prov,'Dias Sd A','Dias Sd  A')],True))
