@@ -10,7 +10,7 @@ Instale las dependencias con `python -m pip install -r requirements.txt` y abra 
 
 SAP: masterdata, ausentismos, cuotas IT2006 y provisiones PVVA, TXT no convertido (pipe o tabulado; también CSV y XLSX). SF: CSV de movimientos de saldo y solicitudes pendientes. Detecta UTF-8, UTF-16 y Windows-1252, encabezados SAP y metadatos SF. Un XLS que realmente contiene texto se lee por contenido. XLS binario antiguo requiere exportarlo como no convertido.
 
-Columnas mínimas: identificador SAP en cada fuente; masterdata `Área de nómina` y `Fecha`/`Fecha de ingreso`/`Alta`; ausencias `Cl.`/`ClAbPre`, `Inicio`, `Final`, `Días`; IT2006 `Cantidad`, `LiquidCont`; provisión `TipoCalc`, `Dias Sd A`; SF saldo `User ID`, `Amount posted` y, para movimientos, `Posting Date`; pendientes `ID personal`, `approvalStatus`, `quantityInDays`. Se conservan las primeras columnas ante encabezados duplicados de SAP.
+Columnas mínimas: identificador SAP en cada fuente; masterdata `Área de nómina`, `Área de personal` y `Fecha`/`Fecha de ingreso`/`Alta`; ausencias `Cl.`/`ClAbPre`, `Inicio`, `Final`, `Días`; IT2006 `Cantidad`, `LiquidCont`; provisión `TipoCalc`, `Dias Sd A`; SF saldo `User ID`, `Amount posted` y, para movimientos, `Posting Date`; pendientes `ID personal`, `approvalStatus`, `quantityInDays`. Se conservan las primeras columnas ante encabezados duplicados de SAP. Se retienen únicamente columnas necesarias para conciliar y se permiten cargas de hasta 1 GB por archivo.
 
 ## Reglas
 

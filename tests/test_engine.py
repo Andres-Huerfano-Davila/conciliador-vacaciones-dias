@@ -7,7 +7,7 @@ from engine import read_file, reconcile, commercial, excel_bytes, absence_total
 
 def fixtures():
     return {
-        'master':pd.DataFrame({'SAP':['1','2'],'Número de personal':['Ana','Luis'],'Área de nómina':['ZM','ZL'],'Fecha':['01.01.2026','01.01.2026'],'Ce.coste':['103','101']}),
+        'master':pd.DataFrame({'SAP':['1','2'],'Número de personal':['Ana','Luis'],'Área de nómina':['ZM','ZL'],'Área de personal':['Non Manager','Non Manager'],'Fecha':['01.01.2026','01.01.2026'],'Ce.coste':['103','101']}),
         'aus':pd.DataFrame({'SAP':['1','2'],'Cl.':['0100','0100'],'Inicio':['01.02.2026']*2,'Final':['02.02.2026']*2,'Días':['1,00']*2}),
         'book':pd.DataFrame({'SAP':['1','2'],'Cantidad':['15,00']*2,'LiquidCont':['10,00']*2}),
         'prov':pd.DataFrame({'SAP':['1','2'],'TipoCalc':['PVVA']*2,'Dias Sd A':['6,50','6,50']}),

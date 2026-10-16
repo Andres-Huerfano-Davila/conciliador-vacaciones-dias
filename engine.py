@@ -104,7 +104,7 @@ def commercial(start, end):
 
 def kind(area):
     a = norm(area)
-    if a == 'ZM' or 'ADMINISTRATIVOS' in a or 'SENA PRODUCT' in a or 'VACACION 22' in a or 'VACACIONES 22' in a:
+    if a == 'ZM' or 'ADMINISTRATIVOS' in a or 'VACACION 22' in a or 'VACACIONES 22' in a:
         return 'ZM'
     if a == 'ZH' or ('PARCIAL' in a and 'HORA' in a): return 'ZH'
     if a == 'ZP' or ('PARCIAL' in a and 'DIA' in a): return 'ZP'
@@ -160,7 +160,7 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
     base = pd.DataFrame({'SAP':master.SAP})
     aliases = {'Nombre':['Número de personal','Nombre del empleado','Nombre'], 'Área nómina':['Área de nómina'], 'Área personal':['Área de personal'], 'CECO':['Ce.coste','CECO'], 'Ingreso':['Fecha de ingreso','Fecha','Alta'], 'Reingreso':['Fecha reingreso','Fecha de reingreso'], 'Baja':['Baja','Fecha de retiro']}
     for dest, options in aliases.items():
-        c = col(master,*options,required=dest in {'Área nómina','Ingreso'})
+        c = col(master,*options,required=dest in {'Área nómina','Área personal','Ingreso'})
         base[dest] = master[c] if c else ''
     # Repeated salary components are allowed only with identical employment data.
     conflicts = set(base.groupby('SAP').filter(lambda g: len(g.drop_duplicates())>1).SAP)
@@ -220,6 +220,7 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
         end=cutoff; retirement=retirements.loc[sap]
         if pd.notna(retirement): end=min(end,retirement.date())
         if not k: obs.append('Área no reconocida o sin masterdata')
+        if pd.isna(r['Área personal']) or not str(r['Área personal']).strip(): obs.append('Falta área personal para identificar SENA')
         if pd.isna(hire): obs.append('Falta fecha ingreso/reingreso')
         if sap in conflicts: obs.append('Masterdata con vigencias o datos contradictorios')
         if not complete_history: obs.append('Histórico completo desde ingreso sin confirmar')
