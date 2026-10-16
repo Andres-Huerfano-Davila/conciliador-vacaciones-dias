@@ -1,0 +1,8 @@
+__pycache__/
+.test_tmp/
+validacion_local.json
+.streamlit/secrets.toml
+*.csv
+*.txt
+*.xlsx
+!requirements.txt
