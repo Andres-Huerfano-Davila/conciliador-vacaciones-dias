@@ -60,16 +60,22 @@ def read_file(data: bytes, name=''):
         'Número de personal','Nombre del empleado','Nombre','Área de nómina','Área de personal',
         'Ce.coste','CECO','Fecha de ingreso','Fecha','Alta','Fecha reingreso','Fecha de reingreso',
         'Baja','Fecha de retiro','Cl.','ClAbPre','Código ausencia','Inicio','Final','Días','Dias',
-        'Cantidad','LiquidCont','TipoCalc','Dias Sd A','Dias Sd  A','Time Account Type External Code',
+        'Cantidad','LiquidCont','TipoCalc','Dias Sd A','Dias Sd  A','Dias N Sld','Dias Trab','Dias Caus','D Pag Acm','D pag P ac','Time Account Type External Code',
         'Posting Date','Posting Type','Amount posted','Saldo','Balance','approvalStatus','externalCode',
         'Time Type External Code','quantityInDays','Current Step Num','Total Steps','startDate','endDate']}
     selected = [i for i,h in enumerate(header) if norm(h) in needed]
     rows = []
+    padded = 0
     for row in reader:
         if not row or all(not x.strip(' -') for x in row):
             continue
         if len(row) != len(header):
-            raise ValueError('Fila con cantidad de columnas distinta al encabezado; revise el archivo.')
+            if len(row) < len(header) and all(i < len(row) for i in selected):
+                # Some CSV exports omit empty trailing columns unrelated to days.
+                row += [''] * (len(header)-len(row))
+                padded += 1
+            else:
+                raise ValueError('Fila con cantidad de columnas distinta al encabezado; revise el archivo.')
         if [x.strip() for x in row] == header:
             continue
         rows.append([row[i].strip() for i in selected])
@@ -78,6 +84,7 @@ def read_file(data: bytes, name=''):
     idcol = col(df, 'Nº pers.', 'N° pers.', 'No pers.', 'User ID', 'ID personal', 'SAP')
     df['SAP'] = df[idcol].str.strip().str.replace(r'\.0$', '', regex=True)
     df = df[df.SAP.str.fullmatch(r'\d+')].copy()
+    df.attrs['Filas con columnas finales vacías omitidas'] = padded
     if df.empty and rows:
         raise ValueError('El archivo no tiene empleados identificables.')
     return df
@@ -95,7 +102,15 @@ def numbers(series, sap=False):
     return result
 
 def dates(series):
-    return pd.to_datetime(series, dayfirst=True, errors='coerce', format='mixed')
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series.dt.normalize()
+    # SF emits an unpadded time ("0:00:00"). Parse each distinct day once,
+    # rather than invoking dateutil for every movement in a large export.
+    text=series.astype('string').str.strip().str.replace(r'(?<=\d)[ T]\d{1,2}:\d{2}.*$','',regex=True)
+    unique=text.dropna().unique()
+    parsed=pd.to_datetime(pd.Series(unique),dayfirst=True,errors='coerce',format='mixed')
+    mapping=dict(zip(unique,parsed))
+    return pd.to_datetime(text.map(mapping),errors='coerce')
 
 def commercial(start, end):
     def ordinal(d):
@@ -154,7 +169,8 @@ def absence_total(rows, start, end, k, codes, vacation=False, sena=False):
 def aggregate(df, field, values):
     return pd.DataFrame({'SAP':df.SAP,field:values}).groupby('SAP')[field].sum(min_count=1)
 
-def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpaid_codes=UNPAID):
+def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpaid_codes=UNPAID,
+              include_orphans=False, history_start=None):
     master, aus, sf, book, prov, pending = [sources[k].copy() for k in ['master','aus','sf','book','prov','pending']]
     meta = {}
     base = pd.DataFrame({'SAP':master.SAP})
@@ -167,7 +183,9 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
     conflicts = set(unique_employment.loc[unique_employment.SAP.duplicated(keep=False),'SAP'])
     base = base.drop_duplicates('SAP').set_index('SAP')
     prov = prov[prov[col(prov,'TipoCalc')].str.upper().eq('PVVA')]
-    base['Provisión'] = aggregate(prov,'Provisión',numbers(prov[col(prov,'Dias Sd A','Dias Sd  A')],True))
+    provision_column = col(prov,'Dias N Sld','Días nuevo saldo','Dias nuevo saldo')
+    base['Provisión'] = aggregate(prov,'Provisión',numbers(prov[provision_column],True))
+    meta['Campo provisión'] = provision_column
     # Cantidad is the original entitlement; LiquidCont is the consumed quota.
     quota = numbers(book[col(book,'Cantidad')],True)
     used = numbers(book[col(book,'LiquidCont')],True)
@@ -190,6 +208,15 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
     pending = pending.drop_duplicates()
     status = col(pending,'approvalStatus')
     typ = col(pending,'externalCode','Time Type External Code',required=False)
+    approved_future = pd.Series(dtype=float)
+    start_column = col(pending,'startDate',required=False)
+    if start_column:
+        future = pending[pending[status].map(norm).eq('APPROVED') &
+                         (pending[typ].str.startswith('CO_vacatio') if typ else True) &
+                         dates(pending[start_column]).dt.date.gt(cutoff)].copy()
+        request_key=['SAP',start_column,col(pending,'endDate'),col(pending,'quantityInDays')]
+        future=future.drop_duplicates(request_key)
+        approved_future=aggregate(future,'Futuras aprobadas SF',numbers(future[col(future,'quantityInDays')]))
     pending = pending[pending[status].map(norm).eq('PENDING') & (pending[typ].str.startswith('CO_vacatio') if typ else True)]
     current = col(pending,'Current Step Num',required=False)
     total = col(pending,'Total Steps',required=False)
@@ -200,17 +227,24 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
     if col(pending,'startDate',required=False) and col(pending,'endDate',required=False):
         pending = pending.drop_duplicates(request_columns)
     base['Pendientes SF'] = aggregate(pending,'Pendientes SF',numbers(pending[col(pending,'quantityInDays')])).reindex(base.index).fillna(0)
+    base['Futuras aprobadas SF'] = approved_future.reindex(base.index).fillna(0)
     a = pd.DataFrame({'SAP':aus.SAP,'code':aus[col(aus,'Cl.','ClAbPre','Código ausencia')].str.zfill(4),'start':dates(aus[col(aus,'Inicio')]),'end':dates(aus[col(aus,'Final')]),'days':numbers(aus[col(aus,'Días','Dias')],True)})
     if a[['start','end']].isna().any().any() or (a.end<a.start).any(): raise ValueError('Ausentismos con fechas inválidas.')
     a = a.drop_duplicates()
     groups = {key:g for key,g in a.groupby('SAP')}
     # Include source-only employees so mismatched universes are visible.
-    universe = set().union(*(set(df.SAP) for df in sources.values()))
+    source_universe = set().union(*(set(df.SAP) for df in sources.values()))
+    master_universe = set(master.SAP)
+    meta['Identificadores fuera del maestro'] = len(source_universe-master_universe)
+    universe = source_universe if include_orphans else master_universe
     base = base.reindex(sorted(universe))
-    for field, df, vals in [('Provisión',prov,numbers(prov[col(prov,'Dias Sd A','Dias Sd  A')],True)),('SAP 2006',book,quota-used),('SF',sf,numbers(sf[col(sf,'Amount posted','Saldo','Balance')]))]:
+    for field, df, vals in [('Provisión',prov,numbers(prov[provision_column],True)),('SAP 2006',book,quota-used),('SF',sf,numbers(sf[col(sf,'Amount posted','Saldo','Balance')]))]:
         base[field] = aggregate(df,field,vals)
     base['Pendientes SF'] = aggregate(pending,'Pendientes SF',numbers(pending[col(pending,'quantityInDays')])).reindex(base.index).fillna(0)
     hires=dates(base.Ingreso); rehires=dates(base.Reingreso); retirements=dates(base.Baja)
+    future_hires = hires.dt.date.gt(cutoff)
+    meta['Ingresos posteriores al corte'] = int(future_hires.sum())
+    base = base.loc[~future_hires]
     output=[]
     for sap,r in base.iterrows():
         obs=[]
@@ -225,6 +259,8 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
         if pd.isna(hire): obs.append('Falta fecha ingreso/reingreso')
         if sap in conflicts: obs.append('Masterdata con vigencias o datos contradictorios')
         if not complete_history: obs.append('Histórico completo desde ingreso sin confirmar')
+        if history_start and pd.notna(hire) and hire.date() < history_start:
+            obs.append(f'Histórico desde {history_start:%d/%m/%Y}; falta período desde ingreso')
         accrued=taken=unpaid=service=balance=float('nan')
         divisor=360 if k=='ZM' else 365
         annual=22 if '22' in norm(r['Área nómina']) else 15
@@ -240,11 +276,17 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
             delta=item[left]-item[right]; item['Δ '+label]=delta
             item[label]='Sin información' if pd.isna(delta) else ('Revisar' if abs(delta)>tolerance+1e-10 else 'OK')
             if item[label]!='OK': obs.append(label+': '+item[label])
-        item['Estado']='Revisar' if obs else 'OK'; item['Observación']='; '.join(obs)
+        states=[item[c] for c in ['Cálculo vs Provisión','SF vs SAP 2006','SAP 2006 vs Provisión','SF vs Provisión']]
+        item['Estado']='Revisar' if 'Revisar' in states else ('Sin información' if obs else 'OK')
+        item['Observación']='; '.join(obs)
         output.append(item)
     result=pd.DataFrame(output).sort_values(['Estado','SAP'],ascending=[False,True])
     meta['Filas leídas']={key:len(df) for key,df in sources.items()}
     meta['Solicitudes pendientes únicas']=len(pending)
+    meta['Validaciones']={c:result[c].value_counts().to_dict() for c in ['Cálculo vs Provisión','SF vs SAP 2006','SAP 2006 vs Provisión','SF vs Provisión']}
+    meta['Inicio observado de ausencias']=str(a.start.min().date()) if not a.empty else None
+    meta['Cobertura declarada desde']=str(history_start) if history_start else None
+    meta['Personas sin SF en el reporte']=int(result.SF.isna().sum())
     meta['Criterio 2006']='Cantidad menos LiquidCont; exportar cuotas correspondientes al corte.'
     return result,meta
 
@@ -254,11 +296,14 @@ def excel_bytes(df):
         df.to_excel(writer,index=False,sheet_name='Conciliación')
         ws=writer.sheets['Conciliación']; ws.freeze_panes='C2'; ws.auto_filter.ref=ws.dimensions
         from openpyxl.styles import PatternFill, Font
-        for c in ws[1]: c.fill=PatternFill('solid',fgColor='17365D'); c.font=Font(color='FFFFFF',bold=True)
+        header_fill=PatternFill('solid',fgColor='17365D')
+        header_font=Font(color='FFFFFF',bold=True)
+        warning_fill=PatternFill('solid',fgColor='FFE3B3')
+        for c in ws[1]: c.fill=header_fill; c.font=header_font
         for column in ws.columns:
             ws.column_dimensions[column[0].column_letter].width=min(55,max(15,len(str(column[0].value))+2))
             for cell in column[1:]:
                 if cell.data_type=='f': cell.data_type='s'
                 if isinstance(cell.value,float): cell.number_format='0.00'
-                if cell.value in ('Revisar','Sin información'): cell.fill=PatternFill('solid',fgColor='FFE3B3')
+                if cell.value in ('Revisar','Sin información'): cell.fill=warning_fill
     return buffer.getvalue()
