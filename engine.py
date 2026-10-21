@@ -60,7 +60,7 @@ def read_file(data: bytes, name=''):
         'Número de personal','Nombre del empleado','Nombre','Área de nómina','Área de personal',
         'Ce.coste','CECO','Fecha de ingreso','Fecha','Alta','Fecha reingreso','Fecha de reingreso',
         'Baja','Fecha de retiro','Cl.','ClAbPre','Código ausencia','Inicio','Final','Días','Dias',
-        'Cantidad','LiquidCont','TipoCalc','Dias Sd A','Dias Sd  A','Dias N Sld','Dias Trab','Dias Caus','D Pag Acm','D pag P ac','Time Account Type External Code',
+        'Tot.días nóm.','Cantidad','LiquidCont','TipoCalc','Dias Sd A','Dias Sd  A','Dias N Sld','Dias Trab','Dias Caus','D Pag Acm','D pag P ac','Time Account Type External Code',
         'Posting Date','Posting Type','Amount posted','Saldo','Balance','approvalStatus','externalCode',
         'Time Type External Code','quantityInDays','Current Step Num','Total Steps','startDate','endDate']}
     selected = [i for i,h in enumerate(header) if norm(h) in needed]
@@ -169,9 +169,40 @@ def absence_total(rows, start, end, k, codes, vacation=False, sena=False):
 def aggregate(df, field, values):
     return pd.DataFrame({'SAP':df.SAP,field:values}).groupby('SAP')[field].sum(min_count=1)
 
+def prepare_absences(sources):
+    """Normalize each export before combining; preserve source membership in audit."""
+    keys = ('aus_full', 'aus_pt', 'aus_pt_current')
+    split = any(key in sources for key in keys)
+    if split:
+        missing = [key for key in keys if key not in sources]
+        if missing:
+            raise ValueError('Faltan archivos de ausencias: ' + ', '.join(missing))
+    else:
+        keys = ('aus',)  # Compatibility for existing programmatic callers.
+    frames = []
+    for key in keys:
+        df = sources[key]
+        a = pd.DataFrame({'SAP': df.SAP,
+            'code': df[col(df, 'Cl.', 'ClAbPre', 'Código ausencia')].str.strip().str.zfill(4),
+            'start': dates(df[col(df, 'Inicio')]), 'end': dates(df[col(df, 'Final')]),
+            'days': numbers(df[col(df, 'Tot.días nóm.', 'Días', 'Dias')], True)})
+        if a[['start', 'end']].isna().any().any() or (a.end < a.start).any():
+            raise ValueError(f'{key}: ausentismos con fechas inválidas.')
+        a['scope'] = ('pt' if key in ('aus_pt', 'aus_pt_current') else 'full') if split else 'all'
+        frames.append(a)
+    combined = pd.concat(frames, ignore_index=True)
+    unique = combined.drop_duplicates()
+    identity = ['scope', 'SAP', 'code', 'start', 'end']
+    conflicts = set(unique.loc[unique.duplicated(identity, keep=False), ['scope', 'SAP']].itertuples(index=False, name=None))
+    audit = {'Duplicados de ausencias eliminados': len(combined) - len(unique),
+             'Empleados con cantidades de ausencias contradictorias': len(conflicts),
+             'Fuentes de ausencias': {key: len(sources[key]) for key in keys}}
+    return unique, conflicts, audit, split
+
+
 def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpaid_codes=UNPAID,
               include_orphans=False, history_start=None):
-    master, aus, sf, book, prov, pending = [sources[k].copy() for k in ['master','aus','sf','book','prov','pending']]
+    master, sf, book, prov, pending = [sources[k].copy() for k in ['master','sf','book','prov','pending']]
     meta = {}
     base = pd.DataFrame({'SAP':master.SAP})
     aliases = {'Nombre':['Número de personal','Nombre del empleado','Nombre'], 'Área nómina':['Área de nómina'], 'Área personal':['Área de personal'], 'CECO':['Ce.coste','CECO'], 'Ingreso':['Fecha de ingreso','Fecha','Alta'], 'Reingreso':['Fecha reingreso','Fecha de reingreso'], 'Baja':['Baja','Fecha de retiro']}
@@ -228,10 +259,9 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
         pending = pending.drop_duplicates(request_columns)
     base['Pendientes SF'] = aggregate(pending,'Pendientes SF',numbers(pending[col(pending,'quantityInDays')])).reindex(base.index).fillna(0)
     base['Futuras aprobadas SF'] = approved_future.reindex(base.index).fillna(0)
-    a = pd.DataFrame({'SAP':aus.SAP,'code':aus[col(aus,'Cl.','ClAbPre','Código ausencia')].str.zfill(4),'start':dates(aus[col(aus,'Inicio')]),'end':dates(aus[col(aus,'Final')]),'days':numbers(aus[col(aus,'Días','Dias')],True)})
-    if a[['start','end']].isna().any().any() or (a.end<a.start).any(): raise ValueError('Ausentismos con fechas inválidas.')
-    a = a.drop_duplicates()
-    groups = {key:g for key,g in a.groupby('SAP')}
+    a, absence_conflicts, absence_audit, split_absences = prepare_absences(sources)
+    meta.update(absence_audit)
+    groups = {key:g for key,g in a.groupby(['scope', 'SAP'])}
     # Include source-only employees so mismatched universes are visible.
     source_universe = set().union(*(set(df.SAP) for df in sources.values()))
     master_universe = set(master.SAP)
@@ -257,6 +287,8 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
         if not k: obs.append('Área no reconocida o sin masterdata')
         if pd.isna(r['Área personal']) or not str(r['Área personal']).strip(): obs.append('Falta área personal para identificar SENA')
         if pd.isna(hire): obs.append('Falta fecha ingreso/reingreso')
+        scope = ('pt' if k in {'ZH', 'ZP'} else 'full') if split_absences else 'all'
+        if (scope, sap) in absence_conflicts: obs.append('Ausencias con días contradictorios entre registros del mismo período')
         if sap in conflicts: obs.append('Masterdata con vigencias o datos contradictorios')
         if not complete_history: obs.append('Histórico completo desde ingreso sin confirmar')
         if history_start and pd.notna(hire) and hire.date() < history_start:
@@ -265,7 +297,7 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
         divisor=360 if k=='ZM' else 365
         annual=22 if '22' in norm(r['Área nómina']) else 15
         if not obs:
-            start=hire.date(); rows=groups.get(sap,a.iloc[:0])
+            start=hire.date(); rows=groups.get((scope,sap),a.iloc[:0])
             service=commercial(start,end) if k=='ZM' else max(0,(end-start).days+1)
             unpaid=absence_total(rows,start,end,k,unpaid_codes,sena=sena)
             taken=absence_total(rows,start,end,k,{'0100'},True)

@@ -15,6 +15,30 @@ def fixtures():
         'pending':pd.DataFrame({'SAP':['1'],'approvalStatus':['PENDING'],'quantityInDays':['2'],'externalCode':['CO_vacatio']})}
 
 class Tests(unittest.TestCase):
+    def test_three_absence_sources_route_and_deduplicate(self):
+        f=fixtures()
+        f['master']['Área de nómina']=['ZM','ZH']
+        f['aus_full']=f.pop('aus')
+        f['aus_pt']=pd.DataFrame({'SAP':['2'], 'Cl.':['0100'], 'Inicio':['01.02.2026'], 'Final':['02.02.2026'], 'Tot.días nóm.':['2,00']})
+        f['aus_pt_current']=f['aus_pt'].copy()
+        r,audit=reconcile(f,date(2026,6,30),True)
+        r=r.set_index('SAP')
+        self.assertEqual(r.loc['1','Días disfrutados'],1)
+        self.assertEqual(r.loc['2','Días disfrutados'],2)
+        self.assertEqual(audit['Duplicados de ausencias eliminados'],1)
+        f['aus_pt_current']['Tot.días nóm.']=['3,00']
+        r,_=reconcile(f,date(2026,6,30),True)
+        self.assertTrue(pd.isna(r.set_index('SAP').loc['2','Cálculo']))
+        self.assertFalse(pd.isna(r.set_index('SAP').loc['1','Cálculo']))
+        del f['aus_pt_current']
+        with self.assertRaisesRegex(ValueError,'Faltan archivos'):
+            reconcile(f,date(2026,6,30),True)
+
+    def test_reader_retains_part_time_payroll_days(self):
+        data='|Nº pers.|ClAbPre|Inicio|Final|Tot.días nóm.|\n|2|0100|01.02.2026|02.02.2026|2,00|\n'
+        frame=read_file(data.encode('cp1252'),'AUS_PT_2026.txt')
+        self.assertEqual(frame['Tot.días nóm.'].iloc[0],'2,00')
+
     def test_sf_dates_with_unpadded_time_preserve_day_first(self):
         d=dates(pd.Series(['05/10/2026 0:00:00','30.09.2026','2026-09-30','31.12.9999','']))
         self.assertEqual(d.iloc[0].date(),date(2026,10,5))

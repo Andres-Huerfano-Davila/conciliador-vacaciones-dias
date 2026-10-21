@@ -8,9 +8,11 @@ Instale las dependencias con `python -m pip install -r requirements.txt` y abra 
 
 ## Entradas
 
-SAP: masterdata, ausentismos, cuotas IT2006 y provisiones PVVA, TXT no convertido (pipe o tabulado; también CSV y XLSX). SF: CSV de movimientos de saldo y solicitudes pendientes. Detecta UTF-8, UTF-16 y Windows-1252, encabezados SAP y metadatos SF. Un XLS que realmente contiene texto se lee por contenido. XLS binario antiguo requiere exportarlo como no convertido.
+Ocho cargas obligatorias: masterdata, AUSENTISMOS_FULLT.txt, AUSNOM_PART_TIME.txt, AUS_PT_2026.txt, cuotas IT2006 y provisiones PVVA, TXT no convertido (pipe o tabulado; también CSV y XLSX). SF: CSV de movimientos de saldo y solicitudes pendientes. Detecta UTF-8, UTF-16 y Windows-1252, encabezados SAP y metadatos SF. Un XLS que realmente contiene texto se lee por contenido. XLS binario antiguo requiere exportarlo como no convertido.
 
 Columnas mínimas: identificador SAP en cada fuente; masterdata `Área de nómina`, `Área de personal` y `Fecha`/`Fecha de ingreso`/`Alta`; ausencias `Cl.`/`ClAbPre`, `Inicio`, `Final`, `Días`; IT2006 `Cantidad`, `LiquidCont`; provisión `TipoCalc`, `Dias N Sld`; SF saldo `User ID`, `Amount posted` y, para movimientos, `Posting Date`; pendientes `ID personal`, `approvalStatus`, `quantityInDays`. Se retienen únicamente columnas necesarias para conciliar y se permiten cargas de hasta 1 GB por archivo. Se toleran columnas finales vacías omitidas solo cuando ninguna columna usada en el cruce está ausente.
+
+Las ausencias full time se aplican a ZM/ZL y SENA Productivo. Para ZH/ZP se unen los dos archivos part time usando `Tot.días nóm.`. Se eliminan duplicados por empleado, clase, fechas y cantidad; cantidades contradictorias para el mismo período dejan el cálculo independiente sin información. La evidencia conserva los conteos, nombres y hashes de las tres fuentes. La cobertura histórica debe abarcar ambas poblaciones desde ingreso/reingreso.
 
 ## Reglas
 

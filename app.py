@@ -24,12 +24,13 @@ with st.sidebar:
         codes=st.text_input('Códigos de ausencias no remuneradas',', '.join(sorted(UNPAID)))
         st.caption('Si hubo cambios históricos de área, cargue una base con la regla aplicable a cada vínculo. Las vigencias contradictorias se marcan para revisar.')
 st.subheader('Carga de archivos')
-labels={'master':'Masterdata SAP','aus':'Ausentismos históricos SAP','book':'Libro vacaciones SAP · Query 2006','prov':'Provisión SAP','sf':'Saldos SF','pending':'Ausentismos pendientes SF'}
+labels={'master':'Masterdata SAP','aus_full':'AUSENTISMOS_FULLT · Ausencias full time','aus_pt':'AUSNOM_PART_TIME · Histórico part time','aus_pt_current':'AUS_PT_2026 · Ausencias part time 2026','book':'Libro vacaciones SAP · Query 2006','prov':'Provisión SAP','sf':'Saldos SF','pending':'Ausentismos pendientes SF'}
 uploads={}
 columns=st.columns(3)
 for i,(key,label) in enumerate(labels.items()):
     with columns[i%3]:
         uploads[key]=st.file_uploader(label,type=['csv'] if key in {'sf','pending'} else ['txt','xls','csv','xlsx'],key=key,help='Se detectan encabezados, separadores y codificación. SAP puede cargarse sin convertir.')
+st.caption('Los tres archivos de ausencias son obligatorios. Full time se usa para ZM/ZL y SENA; los dos part time se consolidan para ZH/ZP, eliminando registros repetidos. Tot.días nóm. aporta los días part time.')
 st.caption('Use exportaciones correspondientes a la fecha de corte. Si el histórico empieza después del ingreso, el saldo calculado requerirá una base inicial y no se debe confirmar cobertura completa.')
 signature=hashlib.sha256((str(cutoff)+str(complete)+str(history_start)+str(include_orphans)+str(manual)+codes).encode())
 for key,file in uploads.items():
@@ -84,4 +85,4 @@ elif saved:
         st.json(audit)
         st.download_button('Descargar evidencia · JSON',json.dumps(audit,ensure_ascii=False,indent=2),file_name=f'Evidencia_{cutoff:%Y%m%d}.json')
 else:
-    st.info('Cargue las seis fuentes y seleccione la fecha de corte para generar un único reporte.')
+    st.info('Cargue las ocho fuentes y seleccione la fecha de corte para generar un único reporte.')
