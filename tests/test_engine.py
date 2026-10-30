@@ -186,4 +186,20 @@ class Tests(unittest.TestCase):
         self.assertTrue(audit['Cobertura detectada automáticamente'])
         self.assertEqual(audit['Cobertura declarada desde'],str(start))
 
+    def test_ceco_change_does_not_block_calculation(self):
+        f=fixtures()
+        extra=f['master'].iloc[[0]].copy()
+        extra['Ce.coste']='OTRO'
+        f['master']=pd.concat([f['master'],extra],ignore_index=True)
+        r,_=reconcile(f,date(2026,6,30),True)
+        row=r.set_index('SAP').loc[extra.SAP.iloc[0]]
+        self.assertFalse(pd.isna(row['Cálculo']))
+        self.assertIsNotNone(row['Ingreso usado'])
+
+    def test_final_step_pending_requests_are_reported(self):
+        f=fixtures()
+        f['pending']=f['pending'].assign(**{'Current Step Num':'2','Total Steps':'2'})
+        r,_=reconcile(f,date(2026,6,30),True)
+        self.assertEqual(r.set_index('SAP').loc['1','Pendientes SF'],2)
+
 if __name__=='__main__': unittest.main()

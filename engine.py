@@ -213,8 +213,9 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
     for dest, options in aliases.items():
         c = col(master,*options,required=dest in {'Área nómina','Área personal','Ingreso'})
         base[dest] = master[c] if c else ''
-    # Repeated salary components are allowed only with identical employment data.
-    unique_employment = base.drop_duplicates()
+    # Repeated rows may differ in CECO or salary band; only fields used by the calculation conflict.
+    is_sena = base['Área personal'].map(lambda v: bool(re.search(r'SENA\s+PRODUCTIV', norm(v))))
+    unique_employment = base[['SAP','Área nómina','Ingreso','Reingreso','Baja']].assign(sena=is_sena).drop_duplicates()
     conflicts = set(unique_employment.loc[unique_employment.SAP.duplicated(keep=False),'SAP'])
     base = base.drop_duplicates('SAP').set_index('SAP')
     prov = prov[prov[col(prov,'TipoCalc')].str.upper().eq('PVVA')]
@@ -253,10 +254,6 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
         future=future.drop_duplicates(request_key)
         approved_future=aggregate(future,'Futuras aprobadas SF',numbers(future[col(future,'quantityInDays')]))
     pending = pending[pending[status].map(norm).eq('PENDING') & (pending[typ].str.startswith('CO_vacatio') if typ else True)]
-    current = col(pending,'Current Step Num',required=False)
-    total = col(pending,'Total Steps',required=False)
-    if current and total:
-        pending = pending[pending[current] != pending[total]]
     # SF workflow exports can repeat a request once per approval step.
     request_columns = ['SAP']+[c for c in [typ,col(pending,'startDate',required=False),col(pending,'endDate',required=False),col(pending,'quantityInDays',required=False)] if c]
     if col(pending,'startDate',required=False) and col(pending,'endDate',required=False):
@@ -270,6 +267,7 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
     meta['Cobertura detectada automáticamente'] = detected
     meta.update(absence_audit)
     groups = {key:g for key,g in a.groupby(['scope', 'SAP'])}
+    late_vacations = {key:g for key,g in a[a.code.eq('0100') & a.end.dt.date.gt(cutoff)].groupby(['scope', 'SAP'])}
     # Include source-only employees so mismatched universes are visible.
     source_universe = set().union(*(set(df.SAP) for df in sources.values()))
     master_universe = set(master.SAP)
@@ -311,7 +309,9 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
             taken=absence_total(rows,start,end,k,{'0100'},True)
             accrued=max(0,service-unpaid)*annual/divisor
             balance=max(0,accrued-taken)
-        item={'SAP':sap,**r.to_dict(),'SENA Productivo':'Sí' if sena else 'No','Corte':cutoff,'Regla':f'{"SENA Productivo comercial" if sena else k}: {annual}/{divisor}' if k else '', 'Días servicio':service,'Días no remunerados':unpaid,'Días causados':accrued,'Días disfrutados':taken,'Cálculo':balance}
+        late=late_vacations.get((scope,sap))
+        after_cutoff=0. if late is None else absence_total(late,cutoff+timedelta(days=1),late.end.max().date(),k,{'0100'},True)
+        item={'SAP':sap,**r.to_dict(),'Ingreso usado':hire.date() if pd.notna(hire) else None,'Vacaciones SAP después del corte':after_cutoff,'SENA Productivo':'Sí' if sena else 'No','Corte':cutoff,'Regla':f'{"SENA Productivo comercial" if sena else k}: {annual}/{divisor}' if k else '', 'Días servicio':service,'Días no remunerados':unpaid,'Días causados':accrued,'Días disfrutados':taken,'Cálculo':balance}
         for label,left,right in [('Cálculo vs Provisión','Cálculo','Provisión'),('SF vs SAP 2006','SF','SAP 2006'),('SAP 2006 vs Provisión','SAP 2006','Provisión'),('SF vs Provisión','SF','Provisión')]:
             tolerance=tolerances[label]
             delta=item[left]-item[right]; item['Δ '+label]=delta
@@ -320,14 +320,19 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
         states=[item[c] for c in ['Cálculo vs Provisión','SF vs SAP 2006','SAP 2006 vs Provisión','SF vs Provisión']]
         item['Estado']='Revisar' if 'Revisar' in states else ('Sin información' if obs else 'OK')
         item['Observación']='; '.join(obs)
+        # Apprentices in school stage and interns do not accrue: no balance in any system.
+        if re.search(r'SENA\s+LECTIV|ESTUDIANTE',norm(r['Área personal'])) and pd.isna(item['SF']) and pd.isna(item['Provisión']):
+            item['Estado']='No aplica'; item['Observación']='Sin saldo de vacaciones en SF ni en provisión por su tipo de vinculación'
         output.append(item)
     result=pd.DataFrame(output).sort_values(['Estado','SAP'],ascending=[False,True])
     meta['Filas leídas']={key:len(df) for key,df in sources.items()}
     meta['Solicitudes pendientes únicas']=len(pending)
-    meta['Validaciones']={c:result[c].value_counts().to_dict() for c in ['Cálculo vs Provisión','SF vs SAP 2006','SAP 2006 vs Provisión','SF vs Provisión']}
+    evaluated=result[result.Estado.ne('No aplica')]
+    meta['Empleados que no aplican']=len(result)-len(evaluated)
+    meta['Validaciones']={c:evaluated[c].value_counts().to_dict() for c in ['Cálculo vs Provisión','SF vs SAP 2006','SAP 2006 vs Provisión','SF vs Provisión']}
     meta['Inicio observado de ausencias']=str(a.start.min().date()) if not a.empty else None
     meta['Cobertura declarada desde']=str(history_start) if history_start else None
-    meta['Personas sin SF en el reporte']=int(result.SF.isna().sum())
+    meta['Personas sin SF en el reporte']=int(evaluated.SF.isna().sum())
     meta['Tolerancias']=tolerances
     meta['Criterio 2006']='Cantidad menos LiquidCont; exportar cuotas correspondientes al corte.'
     return result,meta
@@ -337,7 +342,7 @@ CHECKS = 'Cruces (diferencia = primero − segundo)'
 # Report layout: (group, source column, Excel header). Unknown columns go to the end.
 REPORT = [
     ('Empleado','Estado','Estado'),('Empleado','Observación','Qué revisar'),('Empleado','SAP','SAP'),
-    ('Empleado','Nombre','Nombre'),('Empleado','Área nómina','Área nómina'),('Empleado','Área personal','Área personal'),
+    ('Empleado','Nombre','Nombre'),('Empleado','Ingreso usado','Fecha de ingreso usada'),('Empleado','Área nómina','Área nómina'),('Empleado','Área personal','Área personal'),
     ('Empleado','CECO','CECO'),('Empleado','SENA Productivo','SENA'),
     ('Saldo de vacaciones (días)','Cálculo','Calculado'),('Saldo de vacaciones (días)','SF','SuccessFactors'),
     ('Saldo de vacaciones (días)','SAP 2006','Libro 2006'),('Saldo de vacaciones (días)','Provisión','Provisión'),
@@ -345,14 +350,14 @@ REPORT = [
     (CHECKS,'SF vs SAP 2006','SF vs 2006'),(CHECKS,'Δ SF vs SAP 2006','Diferencia'),
     (CHECKS,'SAP 2006 vs Provisión','2006 vs Provisión'),(CHECKS,'Δ SAP 2006 vs Provisión','Diferencia'),
     (CHECKS,'SF vs Provisión','SF vs Provisión'),(CHECKS,'Δ SF vs Provisión','Diferencia'),
-    ('Solicitudes SF (informativo)','Pendientes SF','Pendientes de aprobar'),('Solicitudes SF (informativo)','Futuras aprobadas SF','Aprobadas futuras'),
+    ('Informativo (no cambia saldos)','Pendientes SF','Pendientes SF'),('Informativo (no cambia saldos)','Futuras aprobadas SF','Aprobadas futuras SF'),('Informativo (no cambia saldos)','Vacaciones SAP después del corte','Vacaciones SAP después del corte'),
     ('Detalle del cálculo','Ingreso','Ingreso'),('Detalle del cálculo','Reingreso','Reingreso'),('Detalle del cálculo','Baja','Retiro'),
     ('Detalle del cálculo','Regla','Regla'),('Detalle del cálculo','Días servicio','Días servicio'),
     ('Detalle del cálculo','Días no remunerados','Días no remunerados'),('Detalle del cálculo','Días causados','Días causados'),
     ('Detalle del cálculo','Días disfrutados','Días disfrutados'),('Detalle del cálculo','Corte','Corte'),
 ]
 PALETTE = {'Empleado':'17365D','Saldo de vacaciones (días)':'1F6F8B',CHECKS:'6B4C9A',
-           'Solicitudes SF (informativo)':'4F7942','Detalle del cálculo':'595959','Otros':'595959'}
+           'Informativo (no cambia saldos)':'4F7942','Detalle del cálculo':'595959','Otros':'595959'}
 
 def excel_bytes(df, cutoff=None, tolerances=None):
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
@@ -375,7 +380,7 @@ def excel_bytes(df, cutoff=None, tolerances=None):
         ws['A1'].font=Font(size=18,bold=True,color='17365D')
         ws['A2']=CREDIT; ws['A2'].font=Font(size=10,italic=True,color='7F7F7F')
         ws['A3']=(f'Empleados: {fmt(len(df))}   ·   Revisar: {fmt(int(estado.eq("Revisar").sum()))}   ·   '
-                  f'OK: {fmt(int(estado.eq("OK").sum()))}   ·   Sin información: {fmt(int(estado.eq("Sin información").sum()))}')
+                  f'OK: {fmt(int(estado.eq("OK").sum()))}   ·   Sin información: {fmt(int(estado.eq("Sin información").sum()))}   ·   No aplica: {fmt(int(estado.eq("No aplica").sum()))}')
         if tolerances:
             ws['A3']=ws['A3'].value+'   ·   Tolerancias ± días: '+', '.join(f'{k} {v:g}'.replace('.',',') for k,v in tolerances.items())
         ws['A3'].font=Font(size=11,bold=True,color='404040')
@@ -403,7 +408,7 @@ def excel_bytes(df, cutoff=None, tolerances=None):
                 cell.alignment=Alignment(vertical='top',wrap_text=source=='Observación',horizontal='center' if source in ('Estado','SAP','SENA') or source in {x[1] for x in REPORT if x[0]==CHECKS and not x[1].startswith('Δ')} else None)
         ws.row_dimensions[top].height=22; ws.row_dimensions[header].height=34
         body=f'A{header+1}:{get_column_letter(width)}{last}'
-        for value,fill,color in [('Revisar','FFC7CE','9C0006'),('OK','C6EFCE','006100'),('Sin información','FFEB9C','7F6000')]:
+        for value,fill,color in [('Revisar','FFC7CE','9C0006'),('OK','C6EFCE','006100'),('Sin información','FFEB9C','7F6000'),('No aplica','E7E6E6','595959')]:
             ws.conditional_formatting.add(body,CellIsRule(operator='equal',formula=[f'"{value}"'],
                 fill=PatternFill('solid',fgColor=fill,bgColor=fill),font=Font(color=color,bold=True)))
         ws.cell(last+2,1,CREDIT).font=Font(size=9,italic=True,color='7F7F7F')

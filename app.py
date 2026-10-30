@@ -1,3 +1,4 @@
+from calendar import monthrange
 from datetime import date
 import hashlib
 import json
@@ -24,8 +25,8 @@ def export_report(frame,cutoff,tolerances):
 
 with st.sidebar:
     st.markdown('### 📅 Fecha de corte')
-    cutoff=st.date_input('Fecha de corte',date.today(),format='DD/MM/YYYY',label_visibility='collapsed')
-    st.caption('Los saldos se concilian a esta fecha.')
+    cutoff=st.date_input('Fecha de corte',date.today().replace(day=monthrange(date.today().year,date.today().month)[1]),format='DD/MM/YYYY',label_visibility='collapsed')
+    st.caption('Use la misma fecha de la provisión; normalmente, el último día del mes.')
     st.divider()
     with st.expander('⚙️ Opciones avanzadas'):
         st.markdown('**Tolerancias (± días)**')
@@ -87,6 +88,8 @@ elif saved:
     c2.metric('🔴 Por revisar',fmt(result.Estado.eq('Revisar').sum()))
     c3.metric('🟢 OK',fmt(result.Estado.eq('OK').sum()))
     c4.metric('🟡 Sin información',fmt(result.Estado.eq('Sin información').sum()))
+    if audit.get('Empleados que no aplican'):
+        st.caption(f'⚪ {fmt(audit["Empleados que no aplican"])} no aplican (SENA Lectivo o estudiantes sin saldo en SF ni en provisión). Están incluidos en el total de empleados.')
     start=audit.get('Cobertura declarada desde')
     if start:
         st.caption(f'Ausencias desde {pd.Timestamp(start):%d/%m/%Y}'+(' (detectado en los archivos)' if audit.get('Cobertura detectada automáticamente') else '')+'. Quien ingresó antes queda sin saldo calculado.')
@@ -98,18 +101,18 @@ elif saved:
                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
     f1,f2,f3=st.columns([1,1,2])
-    status=f1.selectbox('Estado',['Todos','Revisar','OK','Sin información'])
+    status=f1.selectbox('Estado',['Todos','Revisar','OK','Sin información','No aplica'])
     areas=f2.multiselect('Área de nómina',sorted(result['Área nómina'].dropna().unique()))
     search=f3.text_input('Buscar por SAP o nombre',placeholder='Ej. 12345 o Pérez')
     view=result.copy()
     if status!='Todos': view=view[view.Estado.eq(status)]
     if areas: view=view[view['Área nómina'].isin(areas)]
     if search: view=view[view.SAP.str.contains(search,case=False,regex=False)|view.Nombre.fillna('').str.contains(search,case=False,regex=False)]
-    names={'Observación':'Qué revisar','Cálculo':'Calculado','SF':'SuccessFactors','SAP 2006':'Libro 2006','Provisión':'Provisión',
+    names={'Ingreso usado':'Fecha de ingreso usada','Vacaciones SAP después del corte':'Vacaciones SAP tras corte','Observación':'Qué revisar','Cálculo':'Calculado','SF':'SuccessFactors','SAP 2006':'Libro 2006','Provisión':'Provisión',
            'Pendientes SF':'Pendientes SF','Futuras aprobadas SF':'Futuras SF'}
-    front=['Estado','SAP','Nombre','Área nómina','Cálculo','SF','SAP 2006','Provisión','Observación','Pendientes SF','Futuras aprobadas SF']
+    front=['Estado','SAP','Nombre','Ingreso usado','Área nómina','Cálculo','SF','SAP 2006','Provisión','Observación','Pendientes SF','Futuras aprobadas SF','Vacaciones SAP después del corte']
     table=view[[c for c in front if c in view]].rename(columns=names)
-    icons={'Revisar':'🔴 Revisar','OK':'🟢 OK','Sin información':'🟡 Sin información'}
+    icons={'Revisar':'🔴 Revisar','OK':'🟢 OK','Sin información':'🟡 Sin información','No aplica':'⚪ No aplica'}
     table['Estado']=table['Estado'].map(icons)
     st.caption(f'{fmt(len(view))} empleados en pantalla. El Excel trae todos los empleados con el detalle de cada cruce.')
     st.dataframe(table,hide_index=True,use_container_width=True,height=480,
