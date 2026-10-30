@@ -10,6 +10,7 @@ from itertools import islice
 import pandas as pd
 from dateutil.easter import easter
 
+TOLERANCES = {'Cálculo vs Provisión': .25, 'SF vs SAP 2006': 1.25, 'SAP 2006 vs Provisión': 1.25, 'SF vs Provisión': 1.25}
 UNPAID = {'0189', '0191', '0195', '0196', '0197', '0380', '0381', '0397', '0399'}
 
 def norm(value):
@@ -174,9 +175,11 @@ def prepare_absences(sources):
     keys = ('aus_full', 'aus_pt', 'aus_pt_current')
     split = any(key in sources for key in keys)
     if split:
-        missing = [key for key in keys if key not in sources]
+        # AUS_PT_2026 is optional: it only complements the part time history.
+        missing = [key for key in keys[:2] if key not in sources]
         if missing:
             raise ValueError('Faltan archivos de ausencias: ' + ', '.join(missing))
+        keys = tuple(key for key in keys if key in sources)
     else:
         keys = ('aus',)  # Compatibility for existing programmatic callers.
     frames = []
@@ -201,7 +204,8 @@ def prepare_absences(sources):
 
 
 def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpaid_codes=UNPAID,
-              include_orphans=False, history_start=None):
+              include_orphans=False, history_start=None, tolerances=None):
+    tolerances = {**TOLERANCES, **(tolerances or {})}
     master, sf, book, prov, pending = [sources[k].copy() for k in ['master','sf','book','prov','pending']]
     meta = {}
     base = pd.DataFrame({'SAP':master.SAP})
@@ -304,7 +308,8 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
             accrued=max(0,service-unpaid)*annual/divisor
             balance=max(0,accrued-taken)
         item={'SAP':sap,**r.to_dict(),'SENA Productivo':'Sí' if sena else 'No','Corte':cutoff,'Regla':f'{"SENA Productivo comercial" if sena else k}: {annual}/{divisor}' if k else '', 'Días servicio':service,'Días no remunerados':unpaid,'Días causados':accrued,'Días disfrutados':taken,'Cálculo':balance}
-        for label,left,right,tolerance in [('Cálculo vs Provisión','Cálculo','Provisión',.25),('SF vs SAP 2006','SF','SAP 2006',1.25),('SAP 2006 vs Provisión','SAP 2006','Provisión',1.25),('SF vs Provisión','SF','Provisión',1.25)]:
+        for label,left,right in [('Cálculo vs Provisión','Cálculo','Provisión'),('SF vs SAP 2006','SF','SAP 2006'),('SAP 2006 vs Provisión','SAP 2006','Provisión'),('SF vs Provisión','SF','Provisión')]:
+            tolerance=tolerances[label]
             delta=item[left]-item[right]; item['Δ '+label]=delta
             item[label]='Sin información' if pd.isna(delta) else ('Revisar' if abs(delta)>tolerance+1e-10 else 'OK')
             if item[label]!='OK': obs.append(label+': '+item[label])
@@ -319,23 +324,90 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
     meta['Inicio observado de ausencias']=str(a.start.min().date()) if not a.empty else None
     meta['Cobertura declarada desde']=str(history_start) if history_start else None
     meta['Personas sin SF en el reporte']=int(result.SF.isna().sum())
+    meta['Tolerancias']=tolerances
     meta['Criterio 2006']='Cantidad menos LiquidCont; exportar cuotas correspondientes al corte.'
     return result,meta
 
-def excel_bytes(df):
+CREDIT = 'Creado por Equipo de automatizaciones nómina'
+CHECKS = 'Cruces (diferencia = primero − segundo)'
+# Report layout: (group, source column, Excel header). Unknown columns go to the end.
+REPORT = [
+    ('Empleado','Estado','Estado'),('Empleado','Observación','Qué revisar'),('Empleado','SAP','SAP'),
+    ('Empleado','Nombre','Nombre'),('Empleado','Área nómina','Área nómina'),('Empleado','Área personal','Área personal'),
+    ('Empleado','CECO','CECO'),('Empleado','SENA Productivo','SENA'),
+    ('Saldo de vacaciones (días)','Cálculo','Calculado'),('Saldo de vacaciones (días)','SF','SuccessFactors'),
+    ('Saldo de vacaciones (días)','SAP 2006','Libro 2006'),('Saldo de vacaciones (días)','Provisión','Provisión'),
+    (CHECKS,'Cálculo vs Provisión','Calculado vs Provisión'),(CHECKS,'Δ Cálculo vs Provisión','Diferencia'),
+    (CHECKS,'SF vs SAP 2006','SF vs 2006'),(CHECKS,'Δ SF vs SAP 2006','Diferencia'),
+    (CHECKS,'SAP 2006 vs Provisión','2006 vs Provisión'),(CHECKS,'Δ SAP 2006 vs Provisión','Diferencia'),
+    (CHECKS,'SF vs Provisión','SF vs Provisión'),(CHECKS,'Δ SF vs Provisión','Diferencia'),
+    ('Solicitudes SF (informativo)','Pendientes SF','Pendientes de aprobar'),('Solicitudes SF (informativo)','Futuras aprobadas SF','Aprobadas futuras'),
+    ('Detalle del cálculo','Ingreso','Ingreso'),('Detalle del cálculo','Reingreso','Reingreso'),('Detalle del cálculo','Baja','Retiro'),
+    ('Detalle del cálculo','Regla','Regla'),('Detalle del cálculo','Días servicio','Días servicio'),
+    ('Detalle del cálculo','Días no remunerados','Días no remunerados'),('Detalle del cálculo','Días causados','Días causados'),
+    ('Detalle del cálculo','Días disfrutados','Días disfrutados'),('Detalle del cálculo','Corte','Corte'),
+]
+PALETTE = {'Empleado':'17365D','Saldo de vacaciones (días)':'1F6F8B',CHECKS:'6B4C9A',
+           'Solicitudes SF (informativo)':'4F7942','Detalle del cálculo':'595959','Otros':'595959'}
+
+def excel_bytes(df, cutoff=None, tolerances=None):
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.utils import get_column_letter
+    layout=[x for x in REPORT if x[1] in df.columns]
+    layout+=[('Otros',c,c) for c in df.columns if c not in {x[1] for x in layout}]
+    out=df[[x[1] for x in layout]].copy()
+    out.columns=[f'c{i}' for i in range(len(layout))]  # Unique names; real headers written below.
+    top=5  # title, credit, summary, blank, groups; headers on row 6
     buffer=io.BytesIO()
     with pd.ExcelWriter(buffer,engine='openpyxl') as writer:
-        df.to_excel(writer,index=False,sheet_name='Conciliación')
-        ws=writer.sheets['Conciliación']; ws.freeze_panes='C2'; ws.auto_filter.ref=ws.dimensions
-        from openpyxl.styles import PatternFill, Font
-        header_fill=PatternFill('solid',fgColor='17365D')
-        header_font=Font(color='FFFFFF',bold=True)
-        warning_fill=PatternFill('solid',fgColor='FFE3B3')
-        for c in ws[1]: c.fill=header_fill; c.font=header_font
-        for column in ws.columns:
-            ws.column_dimensions[column[0].column_letter].width=min(55,max(15,len(str(column[0].value))+2))
-            for cell in column[1:]:
-                if cell.data_type=='f': cell.data_type='s'
-                if isinstance(cell.value,float): cell.number_format='0.00'
-                if cell.value in ('Revisar','Sin información'): cell.fill=warning_fill
+        out.to_excel(writer,index=False,sheet_name='Conciliación',startrow=top)
+        ws=writer.sheets['Conciliación']
+        ws.sheet_view.showGridLines=False
+        header,last,width=top+1,top+len(out)+1,len(layout)
+        estado=df['Estado'] if 'Estado' in df else pd.Series(dtype=str)
+        fmt=lambda n:f'{n:,}'.replace(',','.')
+        ws['A1']='Conciliación de vacaciones'+(f' · Corte {cutoff:%d/%m/%Y}' if cutoff else '')
+        ws['A1'].font=Font(size=18,bold=True,color='17365D')
+        ws['A2']=CREDIT; ws['A2'].font=Font(size=10,italic=True,color='7F7F7F')
+        ws['A3']=(f'Empleados: {fmt(len(df))}   ·   Revisar: {fmt(int(estado.eq("Revisar").sum()))}   ·   '
+                  f'OK: {fmt(int(estado.eq("OK").sum()))}   ·   Sin información: {fmt(int(estado.eq("Sin información").sum()))}')
+        if tolerances:
+            ws['A3']=ws['A3'].value+'   ·   Tolerancias ± días: '+', '.join(f'{k} {v:g}'.replace('.',',') for k,v in tolerances.items())
+        ws['A3'].font=Font(size=11,bold=True,color='404040')
+        ws.row_dimensions[1].height=28
+        white=Side(style='thin',color='FFFFFF'); line=Side(style='hair',color='D9D9D9')
+        start=1
+        for n,(group,_,_) in enumerate(layout,1):
+            if n==width or layout[n][0]!=group:
+                ws.merge_cells(start_row=top,start_column=start,end_row=top,end_column=n)
+                for c in range(start,n+1):
+                    for r in (top,header):
+                        cell=ws.cell(r,c); cell.fill=PatternFill('solid',fgColor=PALETTE[group])
+                        cell.font=Font(color='FFFFFF',bold=True); cell.border=Border(left=white,right=white,bottom=white)
+                        cell.alignment=Alignment(horizontal='center',vertical='center',wrap_text=True)
+                ws.cell(top,start).value=group
+                start=n+1
+        for n,(_,source,title) in enumerate(layout,1):
+            ws.cell(header,n).value=title
+            ws.column_dimensions[get_column_letter(n)].width={'Observación':60,'Nombre':32,'Regla':26,'Estado':16}.get(source,13)
+            for (cell,) in ws.iter_rows(min_row=header+1,max_row=last,min_col=n,max_col=n):
+                if cell.data_type=='f': cell.data_type='s'  # Never execute text as a formula.
+                if isinstance(cell.value,float): cell.number_format='#,##0.00;[Red]-#,##0.00;0.00'
+                elif hasattr(cell.value,'year'): cell.number_format='dd/mm/yyyy'
+                cell.border=Border(bottom=line)
+                cell.alignment=Alignment(vertical='top',wrap_text=source=='Observación',horizontal='center' if source in ('Estado','SAP','SENA') or source in {x[1] for x in REPORT if x[0]==CHECKS and not x[1].startswith('Δ')} else None)
+        ws.row_dimensions[top].height=22; ws.row_dimensions[header].height=34
+        body=f'A{header+1}:{get_column_letter(width)}{last}'
+        for value,fill,color in [('Revisar','FFC7CE','9C0006'),('OK','C6EFCE','006100'),('Sin información','FFEB9C','7F6000')]:
+            ws.conditional_formatting.add(body,CellIsRule(operator='equal',formula=[f'"{value}"'],
+                fill=PatternFill('solid',fgColor=fill,bgColor=fill),font=Font(color=color,bold=True)))
+        ws.cell(last+2,1,CREDIT).font=Font(size=9,italic=True,color='7F7F7F')
+        ws.freeze_panes=ws.cell(header+1,5)
+        ws.auto_filter.ref=f'A{header}:{get_column_letter(width)}{last}'
+        ws.sheet_view.zoomScale=90
+        ws.oddFooter.center.text=CREDIT
+        ws.page_setup.orientation='landscape'; ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=0
+        ws.sheet_properties.pageSetUpPr.fitToPage=True
+        ws.print_title_rows=f'{top}:{header}'
     return buffer.getvalue()

@@ -31,8 +31,19 @@ class Tests(unittest.TestCase):
         self.assertTrue(pd.isna(r.set_index('SAP').loc['2','Cálculo']))
         self.assertFalse(pd.isna(r.set_index('SAP').loc['1','Cálculo']))
         del f['aus_pt_current']
+        r,_=reconcile(f,date(2026,6,30),True)
+        self.assertEqual(r.set_index('SAP').loc['2','Días disfrutados'],2)
+        del f['aus_pt']
         with self.assertRaisesRegex(ValueError,'Faltan archivos'):
             reconcile(f,date(2026,6,30),True)
+
+    def test_user_tolerances_decide_review(self):
+        f=fixtures()
+        r,_=reconcile(f,date(2026,6,30),True,tolerances={'SF vs SAP 2006':1000})
+        self.assertEqual(r['SF vs SAP 2006'].iloc[0],'OK')
+        r,audit=reconcile(f,date(2026,6,30),True,tolerances={'SF vs SAP 2006':0})
+        self.assertEqual(audit['Tolerancias']['SF vs SAP 2006'],0)
+        self.assertEqual(r['SF vs SAP 2006'].iloc[0],'Revisar' if r['Δ SF vs SAP 2006'].iloc[0]!=0 else 'OK')
 
     def test_reader_retains_part_time_payroll_days(self):
         data='|Nº pers.|ClAbPre|Inicio|Final|Tot.días nóm.|\n|2|0100|01.02.2026|02.02.2026|2,00|\n'
@@ -163,6 +174,9 @@ class Tests(unittest.TestCase):
         self.assertEqual(wb.sheetnames,['Conciliación'])
         ws=wb.active
         self.assertTrue(ws.auto_filter.ref)
-        self.assertEqual(ws['B2'].data_type,'s')
+        names=[c for row in ws.iter_rows() for c in row if c.value=='=1+1']
+        self.assertTrue(names and all(c.data_type=='s' for c in names))
+        self.assertEqual(ws['A2'].value,'Creado por Equipo de automatizaciones nómina')
+        self.assertEqual(ws['A6'].value,'Estado')
 
 if __name__=='__main__': unittest.main()

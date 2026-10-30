@@ -8,7 +8,7 @@ Instale las dependencias con `python -m pip install -r requirements.txt` y abra 
 
 ## Entradas
 
-Ocho cargas obligatorias: masterdata, AUSENTISMOS_FULLT.txt, AUSNOM_PART_TIME.txt, AUS_PT_2026.txt, cuotas IT2006 y provisiones PVVA, TXT no convertido (pipe o tabulado; también CSV y XLSX). SF: CSV de movimientos de saldo y solicitudes pendientes. Detecta UTF-8, UTF-16 y Windows-1252, encabezados SAP y metadatos SF. Un XLS que realmente contiene texto se lee por contenido. XLS binario antiguo requiere exportarlo como no convertido.
+Siete cargas obligatorias y una opcional: masterdata, AUSENTISMOS_FULLT.txt, AUSNOM_PART_TIME.txt, AUS_PT_2026.txt (opcional; si se carga, se une al histórico part time), cuotas IT2006 y provisiones PVVA, TXT no convertido (pipe o tabulado; también CSV y XLSX). SF: CSV de movimientos de saldo y solicitudes pendientes. Detecta UTF-8, UTF-16 y Windows-1252, encabezados SAP y metadatos SF. Un XLS que realmente contiene texto se lee por contenido. XLS binario antiguo requiere exportarlo como no convertido.
 
 Columnas mínimas: identificador SAP en cada fuente; masterdata `Área de nómina`, `Área de personal` y `Fecha`/`Fecha de ingreso`/`Alta`; ausencias `Cl.`/`ClAbPre`, `Inicio`, `Final`, `Días`; IT2006 `Cantidad`, `LiquidCont`; provisión `TipoCalc`, `Dias N Sld`; SF saldo `User ID`, `Amount posted` y, para movimientos, `Posting Date`; pendientes `ID personal`, `approvalStatus`, `quantityInDays`. Se retienen únicamente columnas necesarias para conciliar y se permiten cargas de hasta 1 GB por archivo. Se toleran columnas finales vacías omitidas solo cuando ninguna columna usada en el cruce está ausente.
 
@@ -26,7 +26,7 @@ SAP 2006 = Cantidad − LiquidCont. Provisión = suma de `Dias N Sld` de PVVA (s
 
 El reporte principal usa empleados del maestro con ingreso no posterior al corte. Identificadores presentes solo en fuentes históricas se cuentan en trazabilidad; se incluyen únicamente al activar la opción correspondiente. Cada comparación presenta sus propios conteos OK/Revisar/Sin información. El estado global es Revisar si alguna diferencia numérica supera el umbral; Sin información si no hay diferencias fuera del umbral pero falta algún cruce; OK únicamente si los cuatro cruces están completos y dentro del umbral.
 
-Umbrales estrictos: revisar si diferencia absoluta > 0,25 en cálculo/provisión o > 1,25 en los otros tres cruces. Igual al límite es OK. Se compara sin redondear; se muestran dos decimales.
+Tolerancias definidas por el usuario en Reglas y opciones, una por cruce (por defecto 0,25 en cálculo/provisión y 1,25 en los otros tres). Revisar si la diferencia absoluta supera la tolerancia. Igual al límite es OK. Se compara sin redondear; se muestran dos decimales.
 
 ## Condiciones y límites
 
