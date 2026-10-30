@@ -179,4 +179,11 @@ class Tests(unittest.TestCase):
         self.assertEqual(ws['A2'].value,'Creado por Equipo de automatizaciones nómina')
         self.assertEqual(ws['A6'].value,'Estado')
 
+    def test_auto_history_start_uses_earliest_absence(self):
+        f=fixtures()
+        r,audit=reconcile(f,date(2026,6,30),True,history_start='auto')
+        start=min(pd.to_datetime(f['aus']['Inicio'],dayfirst=True)).date()
+        self.assertTrue(audit['Cobertura detectada automáticamente'])
+        self.assertEqual(audit['Cobertura declarada desde'],str(start))
+
 if __name__=='__main__': unittest.main()

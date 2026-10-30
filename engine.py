@@ -264,6 +264,10 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
     base['Pendientes SF'] = aggregate(pending,'Pendientes SF',numbers(pending[col(pending,'quantityInDays')])).reindex(base.index).fillna(0)
     base['Futuras aprobadas SF'] = approved_future.reindex(base.index).fillna(0)
     a, absence_conflicts, absence_audit, split_absences = prepare_absences(sources)
+    # Without a declared start, coverage begins at the earliest loaded absence.
+    detected = history_start == 'auto'
+    history_start = (a.start.min().date() if not a.empty else None) if detected else history_start
+    meta['Cobertura detectada automáticamente'] = detected
     meta.update(absence_audit)
     groups = {key:g for key,g in a.groupby(['scope', 'SAP'])}
     # Include source-only employees so mismatched universes are visible.
@@ -296,7 +300,7 @@ def reconcile(sources, cutoff, complete_history=False, manual_after=False, unpai
         if sap in conflicts: obs.append('Masterdata con vigencias o datos contradictorios')
         if not complete_history: obs.append('Histórico completo desde ingreso sin confirmar')
         if history_start and pd.notna(hire) and hire.date() < history_start:
-            obs.append(f'Histórico desde {history_start:%d/%m/%Y}; falta período desde ingreso')
+            obs.append(f'Las ausencias cargadas empiezan el {history_start:%d/%m/%Y}, después del ingreso; falta historia para calcular')
         accrued=taken=unpaid=service=balance=float('nan')
         divisor=360 if k=='ZM' else 365
         annual=22 if '22' in norm(r['Área nómina']) else 15
